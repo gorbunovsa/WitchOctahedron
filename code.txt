@@ -1,0 +1,418 @@
+﻿Buffer A:
+
+const float INF = 1e10;
+const float EPS = 1e-5;
+
+const float MARCH_SIZE = 0.1;
+int MAX_STEPS = 100;
+const float ABSORPTION = 0.5;
+
+const vec3 CAMERA_POS = vec3(1.2, 1.5, -6);
+
+float TABLE_Y = -1.15;
+float TABLE_R = 4.0;
+
+const vec3 LIGHT1_POS = vec3(2, 1, 1);
+const float LIGHT1_RAD = 0.3;
+const vec3 LIGHT1_C = vec3(0.93, 0.63, 0.93);
+
+const vec3 LIGHT2_POS = vec3(-2.3, 0.7, 0.5);
+const float LIGHT2_RAD = 0.3;
+const vec3 LIGHT2_C = vec3(1, 0.65, 0);
+
+const vec3 OCTAHEDRON_POS = vec3(0, 0, 0);
+const float OCTAHEDRON_RAD = 1.0;
+const int NUMBER_OF_VERTICES = 6;
+vec3 vertices[NUMBER_OF_VERTICES] = vec3[NUMBER_OF_VERTICES](
+    vec3(-1, 0, 0)*OCTAHEDRON_RAD,
+    vec3(0, 0, -1)*OCTAHEDRON_RAD,
+    vec3(1, 0, 0)*OCTAHEDRON_RAD,
+    vec3(0, 0, 1)*OCTAHEDRON_RAD,
+    vec3(0, 1, 0)*OCTAHEDRON_RAD,
+    vec3(0, -1, 0)*OCTAHEDRON_RAD
+    );
+
+const float CYLINDER_RAD = 1.0;
+const float CYLINDER_H = 0.15;
+
+const vec3 WATER_POS = vec3(0, 0, 0);
+const float WATER_RAD = 0.5;
+const vec3 WATER_C = vec3(0.43, 0.8, 1);
+
+vec3 randVals;
+vec3 randDir;
+
+float pow2(float x)
+{
+    return x * x;
+}
+
+float rand(float frame)
+{
+    return fract(sin(dot(vec3(frame), vec3(12.9898,78.233,45.5432))) * 43758.5453);
+}
+    
+float traceCircle(vec3 pos, vec3 dir, float h, float r, out vec3 normal)
+{
+    // (pos + t * dir).y = H 
+    // t = (H - pos.y) / dir.y
+    float t = (h - pos.y) / dir.y;
+    if(t <= 0.0){
+        return INF;
+    }
+    vec3 worldPos = pos + dir * t;
+    if(dot(worldPos.xz, worldPos.xz) >= r * r){
+        return INF;
+    }
+    normal = vec3(0, 1, 0);
+    return t;
+}
+
+float traceSphere(vec3 pos, vec3 dir, float r, out vec3 normal)
+{
+    // dot(pos + t * dir, pos + t * dir) == r * r;
+    // dot(pos, pos) + 2 * t * dot(pos, dir) + t * t * dot(dir, dir) == r * r
+    float a = dot(dir, dir);
+    float b = dot(pos, dir);
+    float c = dot(pos, pos) - r * r;
+    float D = b * b - a * c;
+    if (D < 0.0){
+        return INF;
+    }
+    float t = -b - sqrt(D);
+    if (t > 0.0){
+        normal = normalize(pos + t* dir);
+        return t;
+    }
+    t = -b + sqrt(D);
+    if (t < 0.0){
+        return INF;
+    }
+    normal = normalize(pos + t* dir);
+    return t;
+}
+
+float traceTriangle(vec3 pos, vec3 dir, vec3 v0, vec3 v1, vec3 v2, out vec3 normal)
+{
+    //Möller–Trumbore intersection algorithm
+    vec3 e1 = v1 - v0;
+    vec3 e2 = v2 - v0;
+    vec3 pvec = cross(dir, e2);
+    float det = dot(e1, pvec);
+    if (det < 1e-8 && det > -1e-8) {
+        return INF; // parallel to the triangle
+    }
+    float inv_det = 1.0 / det;
+    vec3 tvec = pos - v0;
+    float u = dot(tvec, pvec) * inv_det;
+    if (u < 0.0 || u > 1.0) {
+        return INF;
+    }
+    vec3 qvec = cross(tvec, e1);
+    float v = dot(dir, qvec) * inv_det;
+    if (v < 0.0 || u + v > 1.0) {
+        return INF;
+    }
+    float t = dot(e2, qvec) * inv_det;
+    normal = normalize(v0 + v1 + v2);
+    if(t <= 0.0){
+        return INF;
+    }
+    return t;
+}
+
+float traceOctahedron(vec3 pos, vec3 dir, out vec3 normal)
+{
+    float t = INF;
+    float tmp;
+    vec3 n;  
+    for(int j = 0; j < 2; j++){
+        for(int i = 0; i < 4; i++){
+            tmp = traceTriangle(pos, dir, vertices[4 + j], vertices[i], vertices[(1 + i) % 4], n);
+            if(tmp < t && tmp > 0.0){
+                t = tmp;
+                normal = n;
+            }
+        }
+    }
+    return t;  
+}
+
+float traceCylinder(vec3 pos, vec3 dir, float y0, float h, float r, out vec3 normal)
+{
+    // (pos + t * dir).y = H 
+    // t = (H - pos.y) / dir.y
+    float t = (y0 + h - pos.y) / dir.y;
+    if(t <= 0.0){
+        return INF;
+    }
+    vec3 worldPos = pos + t * dir;
+    if(dot(worldPos.xz, worldPos.xz) < r * r){
+        normal = vec3(0, 1, 0);
+        return t;
+    }
+    //dot(pos.xz + t * dir.xz, pos.xz + t * dir.xz) = r * r
+    //t * t * dot(dir.xz, dir.xz) + 2 * t * dot(pos.xz, dir.xz) + dot(pos.xz, pos.xz) - r * r = 0
+    float a = dot(dir.xz, dir.xz);
+    float b = dot(pos.xz, dir.xz);
+    float c = dot(pos.xz, pos.xz) - r * r;
+    float D = b * b - a * c;
+    if(D < 0.0){
+        return INF;
+    }
+    t = (-b - sqrt(D)) / a;
+    if(t > 0.0){
+        worldPos = pos + t * dir;
+        if(worldPos.y >= y0 && worldPos.y <= y0 + h){
+            normal = normalize(vec3(worldPos.x, 0, worldPos.z));
+            return t;
+        }
+    }
+    t = (-b + sqrt(D)) / a;
+    if (t < 0.0) {
+        return INF;
+    }
+    worldPos = pos + t * dir;
+    if(worldPos.y >= y0 && worldPos.y <= y0 + h){
+        normal = normalize(vec3(worldPos.x, 0, worldPos.z));
+        return t;
+    }
+    return INF;
+
+}
+
+bool isOccluded(vec3 pos, vec3 target)
+{
+    vec3 dir = target - pos;
+    float dist = length(dir);
+    dir /= dist;
+    vec3 octahedronN;
+    float octahedronT = traceOctahedron(pos - OCTAHEDRON_POS, dir, octahedronN);
+    if (octahedronT < dist){
+        return true;
+    }
+    vec3 cylN;
+    float cylT = traceCylinder(pos + dir * EPS, dir, TABLE_Y, CYLINDER_H, CYLINDER_RAD, cylN);
+    return (cylT < dist);
+}
+
+vec3 computeLight(vec3 pos, vec3 color, vec3 normal)
+{
+    vec3 l1 = LIGHT1_POS - pos;
+    float att1 = isOccluded(pos, LIGHT1_POS + randDir * LIGHT1_RAD) ? 0.0 : 10.0f / dot(l1, l1);
+    vec3 l2 = LIGHT2_POS - pos;
+    float att2 = isOccluded(pos, LIGHT2_POS + randDir * LIGHT2_RAD) ? 0.0 : 7.0f / dot(l2, l2);
+    return color * (max(0.0, dot(normal, normalize(l1))) * att1 * LIGHT1_C
+                    + max(0.0, dot(normal, normalize(l2))) * att2 * LIGHT2_C
+                    + texture(iChannel1, normal).rgb * 0.1);
+}
+
+vec3 refraction(vec3 v, vec3 normal, float n1, float n2, out bool isRefracted)
+{
+    if (dot(v, normal) < 0.0){
+        normal = -normal;
+    }
+    float cosA = dot(v, normal);
+    float sinA = sqrt(1.0 - cosA * cosA);
+    vec3 tang = normalize(v - cosA * normal);
+    float sinB = sinA / n2 * n1;
+    if(sinB > 1.0){
+        isRefracted = false;
+        return reflect(v, normal);
+    }
+    float cosB = sqrt(1.0 - sinB * sinB);
+    isRefracted = true;
+    return normalize(sinB * tang + cosB * normal);
+}
+
+float sdfWater(vec3 pos)
+{
+    return length(pos - WATER_POS) - WATER_RAD;
+}
+
+
+float BeerLambert(float absorptionCoefficient, float distanceTraveled)
+{
+    return exp(-absorptionCoefficient * distanceTraveled);
+}
+
+vec4 sampleWater(vec3 pos, vec3 dir)
+{
+    vec3 waterColorAtPoint;
+    float opacity = 1.0;
+    float absSum = 0.0;
+    for (int i = 0; i < MAX_STEPS; ++i){
+        vec3 curPos = pos + float(i) * MARCH_SIZE * dir;
+        float sdf = sdfWater(curPos);
+        if (sdf < 0.0) {
+            waterColorAtPoint = (WATER_C * texture(iChannel3, curPos * 0.8).r 
+                                + WATER_C * texture(iChannel3, curPos * randVals.x).r) * 0.5;
+            float prevOpacity = opacity;
+            opacity *= BeerLambert(ABSORPTION, MARCH_SIZE);
+            float absorption = prevOpacity - opacity;
+            absSum += absorption;
+        }
+    }
+    return vec4(2.0 * waterColorAtPoint * absSum, 1.0 - opacity);
+}
+
+void mainImage(out vec4 fragColor, in vec2 fragCoord)
+{
+    vec3 randVals = vec3(rand(float(iFrame)), rand(float(iFrame + 5)), rand(float(iFrame + 15)));
+    randDir = normalize(randVals - 0.5);
+    vec2 uv = (fragCoord - iResolution.xy * 0.5 + (randVals.xy - 0.5) * 2.0) /iResolution.x;
+    vec3 front = normalize(-CAMERA_POS);
+    vec3 up = vec3(0, 1, 0);
+    vec3 right = normalize(cross(front, up));
+    up = normalize(cross(right, front));
+    vec3 viewVec = front + right * uv.x + up * uv.y;
+    
+    const int EMISSION = 0;
+    const int DIFFUSE = 1;
+    const int REFLECTION = 2;
+    const int REFRACTION = 3;
+    
+    vec3 curPos = CAMERA_POS;
+    vec3 curDir = viewVec;
+    
+    const float AIR_N = 1.0;
+    const float GLASS_N = 1.5;
+    const float WATER_N = 1.33;
+    float n1 = AIR_N;
+    float n2 = GLASS_N;
+    float GLASS_R = pow2(AIR_N - GLASS_N) / pow2(AIR_N + GLASS_N);
+    float WATER_R = pow2(WATER_N - GLASS_N) / pow2(WATER_N + GLASS_N);
+    
+    float mult = 1.0;
+    vec3 colorMult = vec3(1, 1, 1);
+    
+    //trace loop
+    for(int i = 0; i < 10; i++){
+        int materialType;
+        vec3 color;
+        vec3 normal;
+        float t = INF;
+        bool isRefracted = false;
+        vec3 tableN;
+        float tableT = traceCircle(curPos, curDir, TABLE_Y, TABLE_R, tableN);
+        if(tableT < t){
+            t = tableT;
+            normal = tableN;
+            materialType = DIFFUSE;
+            vec3 worldPos = curPos + curDir * t;
+            color = texture(iChannel0, worldPos.xz * 0.3).rgb;
+        }
+        vec3 light1N;
+        float light1T = traceSphere(curPos - LIGHT1_POS, curDir, LIGHT1_RAD, light1N);
+        if(light1T < t){
+            t = light1T;
+            normal = light1N;
+            materialType = EMISSION;
+            color = LIGHT1_C;
+        }
+        vec3 light2N;
+        float light2T = traceSphere(curPos - LIGHT2_POS, curDir, LIGHT2_RAD, light2N);
+        if(light2T < t){
+            t = light2T;
+            normal = light2N;
+            materialType = EMISSION;
+            color = LIGHT2_C;
+        }
+        vec3 cylN;
+        float cylT = traceCylinder(curPos, curDir, TABLE_Y, CYLINDER_H, CYLINDER_RAD, cylN);
+        if(cylT < t){
+            t = cylT;
+            normal = cylN;
+            if(randVals.x < 0.2){
+                materialType = REFLECTION;
+            }else{
+                materialType = DIFFUSE;
+            }
+            vec3 worldPos = curPos + curDir * t;
+            color = texture(iChannel2, worldPos.xz * worldPos.y).rgb;
+        }
+        vec3 octahedronN;
+        float octahedronT = traceOctahedron(curPos - OCTAHEDRON_POS, curDir, octahedronN);
+        if(octahedronT < t){
+            t = octahedronT;
+            normal = octahedronN;
+            float R;
+            if(n1 == AIR_N){
+                R = GLASS_R;
+            }else{
+                R = WATER_R;
+            }
+            if(randVals.y < R){
+                materialType = REFLECTION;
+            }else{
+                colorMult *= vec3(0.87, 0.93, 1.0);
+                materialType = REFRACTION;
+                if(dot(curDir, normal) > 0.0){
+                    n2 = AIR_N;
+                }else{
+                    n2 = GLASS_N;
+                }
+            }
+        }
+        vec3 waterN;
+        float waterT = traceSphere(curPos - WATER_POS, curDir, WATER_RAD, waterN);
+        if(waterT < t){
+            t = waterT;
+            normal = waterN;
+            if(randVals.z < WATER_R){
+                materialType = REFLECTION;
+            }else{
+                materialType = REFRACTION;
+                if(dot(curDir, normal) > 0.0){
+                    n2 = GLASS_N;
+                }else{
+                    n2 = WATER_N;
+                }
+            }
+        }
+        if(t != INF){
+            vec3 worldPos = curPos + curDir * t;
+            if(materialType == EMISSION){
+                fragColor.rgb = color;
+                break;
+            }else if(materialType == DIFFUSE){
+                fragColor.rgb += computeLight(worldPos, color, normal) * colorMult * mult;
+                break;
+            }else if(materialType == REFLECTION){
+                curDir = reflect(curDir, normal);
+                curPos = worldPos + curDir * EPS;
+            }else if(materialType == REFRACTION){
+                curDir = refraction(curDir, normal, n1, n2, isRefracted);
+                curPos = worldPos + curDir * EPS;
+                vec4 water = sampleWater(curPos, curDir);
+                fragColor.rgb += water.rgb * water.a * mult;
+                mult *= 1.0 - water.a;
+                if(isRefracted){
+                    n1 = n2;
+                }
+            }
+        }else{
+            fragColor.rgb += texture(iChannel1, curDir).rgb * colorMult *  mult;
+            break;
+        }
+    }  
+}
+
+Buffer B:
+
+void mainImage(out vec4 fragColor, in vec2 fragCoord)
+{
+    vec2 uv = fragCoord/iResolution.xy;
+    fragColor = texture(iChannel0, uv) + texture(iChannel1, uv);
+}
+
+Image:
+
+void mainImage(out vec4 fragColor, in vec2 fragCoord)
+{
+    // Normalized pixel coordinates (from 0 to 1)
+    vec2 uv = fragCoord/iResolution.xy;
+
+    // Output to screen
+    fragColor = texture(iChannel0, uv) / float(iFrame + 1);
+}
